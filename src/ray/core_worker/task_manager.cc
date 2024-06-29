@@ -300,7 +300,9 @@ std::vector<rpc::ObjectReference> TaskManager::AddPendingTask(
   return returned_refs;
 }
 
-bool TaskManager::ResubmitTask(const TaskID &task_id, std::vector<ObjectID> *task_deps) {
+bool TaskManager::ResubmitTask(const TaskID &task_id,
+                               std::vector<ObjectID> &task_deps,
+                               rpc::ErrorType &error_type) {
   TaskSpecification spec;
   bool resubmit = false;
   std::vector<ObjectID> return_ids;
@@ -310,6 +312,11 @@ bool TaskManager::ResubmitTask(const TaskID &task_id, std::vector<ObjectID> *tas
     if (it == submissible_tasks_.end()) {
       // This can happen when the task has already been
       // retried up to its max attempts.
+      error_type = rpc::ErrorType::OBJECT_UNRECONSTRUCTABLE_MAX_ATTEMPTS_EXCEEDED;
+      return false;
+    }
+    if (it->second.cancelled) {
+      error_type = rpc::ErrorType::TASK_CANCELLED;
       return false;
     }
 
@@ -340,18 +347,18 @@ bool TaskManager::ResubmitTask(const TaskID &task_id, std::vector<ObjectID> *tas
   if (resubmit) {
     for (size_t i = 0; i < spec.NumArgs(); i++) {
       if (spec.ArgByRef(i)) {
-        task_deps->push_back(spec.ArgId(i));
+        task_deps.push_back(spec.ArgId(i));
       } else {
         const auto &inlined_refs = spec.ArgInlinedRefs(i);
         for (const auto &inlined_ref : inlined_refs) {
-          task_deps->push_back(ObjectID::FromBinary(inlined_ref.object_id()));
+          task_deps.push_back(ObjectID::FromBinary(inlined_ref.object_id()));
         }
       }
     }
 
-    reference_counter_->UpdateResubmittedTaskReferences(return_ids, *task_deps);
+    reference_counter_->UpdateResubmittedTaskReferences(return_ids, task_deps);
 
-    for (const auto &task_dep : *task_deps) {
+    for (const auto &task_dep : task_deps) {
       bool was_freed = reference_counter_->TryMarkFreedObjectInUseAgain(task_dep);
       if (was_freed) {
         RAY_LOG(DEBUG) << "Dependency " << task_dep << " of task " << task_id
@@ -1104,6 +1111,9 @@ bool TaskManager::FailOrRetryPendingTask(const TaskID &task_id,
                                          const rpc::RayErrorInfo *ray_error_info,
                                          bool mark_task_object_failed,
                                          bool fail_immediately) {
+  RAY_LOG(ERROR) << "FailOrRetryPendingTask called with task_id " << task_id
+                 << "error type " << rpc::ErrorType_Name(error_type)
+                 << " fail_immediately " << fail_immediately << ", " << ray::StackTrace();
   // Note that this might be the __ray_terminate__ task, so we don't log
   // loudly with ERROR here.
   RAY_LOG(WARNING) << "Task attempt " << task_id << " failed with error "
@@ -1273,6 +1283,7 @@ bool TaskManager::MarkTaskCanceled(const TaskID &task_id) {
   if (it != submissible_tasks_.end()) {
     it->second.num_retries_left = 0;
     it->second.num_oom_retries_left = 0;
+    it->second.cancelled = true;
   }
   return it != submissible_tasks_.end();
 }

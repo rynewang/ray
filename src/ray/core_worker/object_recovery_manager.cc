@@ -157,19 +157,24 @@ void ObjectRecoveryManager::ReconstructObject(const ObjectID &object_id) {
     return;
   }
 
-  RAY_LOG(DEBUG) << "Attempting to reconstruct object " << object_id;
   // Notify the task manager that we are retrying the task that created this
   // object.
   const auto task_id = object_id.TaskId();
+
+  RAY_LOG(DEBUG).WithField(kLogKeyTaskID, task_id).WithField(kLogKeyObjectID, object_id)
+      << "Attempting to reconstruct object.";
+
   std::vector<ObjectID> task_deps;
-  auto resubmitted = task_resubmitter_->ResubmitTask(task_id, &task_deps);
+  rpc::ErrorType error_type;
+  bool resubmitted = task_resubmitter_->ResubmitTask(task_id, task_deps, error_type);
 
   if (resubmitted) {
     // Try to recover the task's dependencies.
     for (const auto &dep : task_deps) {
       auto recovered = RecoverObject(dep);
       if (!recovered) {
-        RAY_LOG(INFO) << "Failed to reconstruct object " << dep;
+        RAY_LOG(INFO) << "Failed to reconstruct dependency object " << dep
+                      << " for object " << object_id;
         // This case can happen if the dependency was borrowed from another
         // worker, or if there was a bug in reconstruction that caused us to GC
         // the dependency ref.
@@ -180,12 +185,13 @@ void ObjectRecoveryManager::ReconstructObject(const ObjectID &object_id) {
       }
     }
   } else {
-    RAY_LOG(INFO) << "Failed to reconstruct object " << object_id
-                  << " because lineage has already been deleted";
-    recovery_failure_callback_(
-        object_id,
-        rpc::ErrorType::OBJECT_UNRECONSTRUCTABLE_MAX_ATTEMPTS_EXCEEDED,
-        /*pin_object=*/true);
+    RAY_LOG(INFO).WithField(kLogKeyObjectID, object_id)
+        << "Failed to reconstruct object because lineage has already been deleted or "
+           "task cancelled: "
+        << rpc::ErrorType_Name(error_type);
+    recovery_failure_callback_(object_id,
+                               error_type,
+                               /*pin_object=*/true);
   }
 }
 

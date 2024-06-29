@@ -795,8 +795,20 @@ Status CoreWorkerDirectTaskSubmitter::CancelTask(TaskSpecification task_spec,
     auto rpc_client = executing_tasks_.find(task_spec.TaskId());
 
     if (rpc_client == executing_tasks_.end()) {
-      // This case is reached for tasks that have unresolved dependencies.
-      // No executing tasks, so cancelling is a noop.
+      // Task is not scheduling, nor executing, but is submissible. It can be:
+      // 1. Pending (waiting for dependencies to resolve)
+      //    - we fail it immediately.
+      // 2. Finished/Failed (may be resubmitted by lineage reconstruction later)
+      //    - we mark it as "cancelled", when it's resubmitted, it will be failed.
+      if (task_finisher_->IsTaskPending(task_spec.TaskId())) {
+        RAY_UNUSED(task_finisher_->FailPendingTask(task_spec.TaskId(),
+                                                   rpc::ErrorType::TASK_CANCELLED));
+      } else {
+        // no-op, task is already marked cancelled in MarkTaskCanceled
+        RAY_LOG(DEBUG).WithField(kLogKeyTaskID, task_spec.TaskId())
+            << "Task is finished/failed but submissible for lineage reconstruction. "
+               "Marking as cancelled. Next time it's resubmitted it will be failed.";
+      }
       if (scheduling_key_entry.CanDelete()) {
         // We can safely remove the entry keyed by scheduling_key from the
         // scheduling_key_entries_ hashmap.

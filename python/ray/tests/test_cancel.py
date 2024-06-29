@@ -5,6 +5,7 @@ import sys
 import threading
 import _thread
 import time
+import numpy as np
 
 import pytest
 
@@ -278,6 +279,181 @@ def test_cancel_during_arg_deser_non_reentrant_import(ray_start_regular):
     # Should raise RayTaskError or TaskCancelledError, NOT WorkerCrashedError.
     with pytest.raises(valid_exceptions(use_force)):
         ray.get(obj)
+
+
+@pytest.mark.parametrize("is_generator", [True, False])
+def test_cancel_during_pending_arg(shutdown_only, is_generator):
+    ray.init()
+
+    @ray.remote(max_retries=-1)
+    def wait_forever():
+        print("waiting for godot...")
+        while True:
+            time.sleep(10000)
+
+    @ray.remote(max_retries=-1)
+    def has_deps(godot):
+        return godot
+
+    @ray.remote(max_retries=-1)
+    def has_deps_gen(godot):
+        yield godot
+        yield godot * 2
+
+    godot = wait_forever.remote()
+    if is_generator:
+        ref = has_deps_gen.remote(godot)
+    else:
+        ref = has_deps.remote(godot)
+    print(f"{ref=}")
+
+    ready, not_ready = ray.wait([godot, ref], timeout=1)
+    assert not ready
+    assert len(not_ready) == 2
+    print(f"both are not ready: {godot=}, {ref=}")
+
+    # Now, the task has_deps is pending arg. Cancel it.
+    print("Cancelling")
+    ray.cancel(ref)
+
+    print("Getting")
+    with pytest.raises(ray.exceptions.TaskCancelledError):
+        ray.get(ref)
+
+
+@pytest.mark.parametrize("use_force", [True, False])
+def test_cancel_resubmitting_during_pending_arg(ray_start_cluster, use_force):
+    """
+    Cancel a task while it is resubmitting dur to lineage reconstruction, and pending an
+    argument.
+    """
+    cluster = ray_start_cluster
+    # Head node with no resources.
+    cluster.add_node(num_cpus=0, resources={"head": 10})
+    ray.init(address=cluster.address)
+    # Node to place the initial object.
+    node_to_kill = cluster.add_node(
+        num_cpus=10, object_store_memory=10**8, resources={"worker": 10}
+    )
+    cluster.wait_for_nodes()
+
+    @ray.remote(max_retries=-1, resources={"worker": 1})
+    def wait_and_make_big(signaler):
+        ray.get(signaler.wait.remote())
+        ray.get(signaler.send.remote(clear=True))
+        return np.ones(1_000_000)
+
+    @ray.remote(max_retries=-1, resources={"worker": 1})
+    def has_deps(big):
+        return big * 2
+
+    @ray.remote(max_retries=-1, resources={"worker": 1})
+    def assert_returned(a1):
+        assert np.array_equal(a1, np.ones(1_000_000) * 2)
+
+    # First run: all good
+    signaler = SignalActor.options(resources={"head": 1}).remote()
+    big_ref = wait_and_make_big.remote(signaler)
+    ret_ref = has_deps.remote(big_ref)
+    ray.get(signaler.send.remote())
+    print(f"{signaler=}, {big_ref=}, {ret_ref=}")
+    ray.get(assert_returned.remote(ret_ref))
+
+    # Kill the node to trigger lineage reconstruction. This time, `big_ref` will hang
+    # forever waiting for the signal, and the generator will be resubmitted and waiting
+    # for the argument.
+    cluster.remove_node(node_to_kill, allow_graceful=False)
+    node_to_kill = cluster.add_node(
+        num_cpus=10, object_store_memory=10**8, resources={"worker": 10}
+    )
+
+    time.sleep(2)
+
+    ready, not_ready = ray.wait([big_ref, ret_ref], timeout=1)
+    assert not ready
+    assert len(not_ready) == 2
+
+    # ray.get(signaler.send.remote())
+    # time.sleep(10)
+    # return
+
+    # Now, the task has_deps is pending arg. Cancel it.
+    print("Cancelling")
+    ray.cancel(ret_ref)
+
+    print("Getting")
+    with pytest.raises(ray.exceptions.TaskCancelledError):
+        ray.get(ret_ref)
+
+
+@pytest.mark.parametrize("use_force", [True, False])
+def test_cancel_resubmitting_generator_during_pending_arg(ray_start_cluster, use_force):
+    """
+    Cancel a streaming generator task while it is pending an argument should work.
+    Problem is, we want to cancel the objects yielded by the generator, but it won't
+    yield until it gets the argument. So, we need to let the task run, then fail the
+    node to trigger lineage reconstruction, then let the resubmit generator wait for
+    the argument, then cancel it.
+    """
+    cluster = ray_start_cluster
+    # Head node with no resources.
+    cluster.add_node(num_cpus=0, resources={"head": 10})
+    ray.init(address=cluster.address)
+    # Node to place the initial object.
+    node_to_kill = cluster.add_node(
+        num_cpus=10, object_store_memory=10**8, resources={"worker": 10}
+    )
+    cluster.wait_for_nodes()
+
+    @ray.remote(max_retries=-1, resources={"worker": 1})
+    def wait_and_make_big(signaler):
+        ray.get(signaler.wait.remote())
+        ray.get(signaler.send.remote(clear=True))
+        return np.ones(1_000_000)
+
+    @ray.remote(max_retries=-1, resources={"worker": 1})
+    def has_deps(big):
+        yield big * 2
+        yield big * 3
+        yield big * 4
+
+    @ray.remote(max_retries=-1, resources={"worker": 1})
+    def assert_yielded(a1, a2, a3):
+        assert np.array_equal(a1, np.ones(1_000_000) * 2)
+        assert np.array_equal(a2, np.ones(1_000_000) * 3)
+        assert np.array_equal(a3, np.ones(1_000_000) * 4)
+
+    # First run: all good
+    signaler = SignalActor.options(resources={"head": 1}).remote()
+    big_ref = wait_and_make_big.remote(signaler)
+    gen_ref = has_deps.remote(big_ref)
+    ray.get(signaler.send.remote())
+    refs = list(gen_ref)
+    print(f"{signaler=}, {big_ref=}, {gen_ref=}, {refs=}")
+    ray.get(assert_yielded.remote(*refs))
+
+    # Kill the node to trigger lineage reconstruction. This time, `big_ref` will hang
+    # forever waiting for the signal, and the generator will be resubmitted and waiting
+    # for the argument.
+    cluster.remove_node(node_to_kill, allow_graceful=False)
+    node_to_kill = cluster.add_node(
+        num_cpus=10, object_store_memory=10**8, resources={"worker": 10}
+    )
+    cluster.wait_for_nodes()
+
+    print(f"waiting for all refs {[big_ref, *refs]}")
+    ready, not_ready = ray.wait([big_ref, *refs], timeout=1)
+    assert not ready
+    assert len(not_ready) == 4
+
+    # Now, the task has_deps is pending arg. Cancel it.
+    print("Cancelling")
+    ray.cancel(refs[0])
+
+    print("Getting")
+    for ref in refs:
+        with pytest.raises(ray.exceptions.TaskCancelledError):
+            ray.get(ref)
 
 
 @pytest.mark.parametrize("use_force", [True, False])

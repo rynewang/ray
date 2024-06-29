@@ -66,12 +66,16 @@ class TaskFinisherInterface {
 
   virtual absl::optional<TaskSpecification> GetTaskSpec(const TaskID &task_id) const = 0;
 
+  virtual bool IsTaskPending(const TaskID &task_id) const = 0;
+
   virtual ~TaskFinisherInterface() {}
 };
 
 class TaskResubmissionInterface {
  public:
-  virtual bool ResubmitTask(const TaskID &task_id, std::vector<ObjectID> *task_deps) = 0;
+  virtual bool ResubmitTask(const TaskID &task_id,
+                            std::vector<ObjectID> &task_deps,
+                            rpc::ErrorType &error_type) = 0;
 
   virtual ~TaskResubmissionInterface() {}
 };
@@ -264,9 +268,12 @@ class TaskManager : public TaskFinisherInterface, public TaskResubmissionInterfa
   /// responsible for making sure that these dependencies become available, so
   /// that the resubmitted task can run. This is only populated if the task was
   /// not already pending and was successfully resubmitted.
+  /// \param[out] error_type Reason why the resubmission failed.
   /// \return OK if the task was successfully resubmitted or was
   /// already pending, Invalid if the task spec is no longer present.
-  bool ResubmitTask(const TaskID &task_id, std::vector<ObjectID> *task_deps) override;
+  bool ResubmitTask(const TaskID &task_id,
+                    std::vector<ObjectID> &task_deps,
+                    rpc::ErrorType &error_type) override;
 
   /// Wait for all pending tasks to finish, and then shutdown.
   ///
@@ -551,7 +558,7 @@ class TaskManager : public TaskFinisherInterface, public TaskResubmissionInterfa
   ///
   /// \param[in] task_id ID of the task to query.
   /// \return Whether the task is pending.
-  bool IsTaskPending(const TaskID &task_id) const;
+  bool IsTaskPending(const TaskID &task_id) const override;
 
   /// Return whether the task is scheduled adn waiting for execution.
   ///
@@ -725,6 +732,9 @@ class TaskManager : public TaskFinisherInterface, public TaskResubmissionInterfa
     int64_t lineage_footprint_bytes = 0;
     // Number of times this task successfully completed execution so far.
     int num_successful_executions = 0;
+    // The task is marked cancelled. Next time the task is submitted, it will
+    // fail immediately.
+    bool cancelled = false;
 
    private:
     // The task's current execution and metric status (name, status, is_retry).
