@@ -543,7 +543,7 @@ def check_status_or_return(tup: Tuple[StatusParts, Any]):
     return val
 
 
-cdef make_future_and_callback(postprocess = None):
+cdef make_future_and_callback(postprocess=None):
     """
     Prepares a series of async call and returns (future, callback).
     In runtime it's in this order:
