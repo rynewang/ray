@@ -197,6 +197,7 @@ ray_cc_library(
         "asio/asio_chaos.h",
         "asio/asio_util.h",
         "asio/instrumented_io_context.h",
+        "asio/dedicated_io_context_thread.h",
         "asio/io_service_pool.h",
         "asio/periodical_runner.h",
     ],
