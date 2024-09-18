@@ -287,24 +287,5 @@ class GcsTableStorage {
   std::unique_ptr<GcsInternalConfigTable> system_config_table_;
 };
 
-/// \class RedisGcsTableStorage
-/// RedisGcsTableStorage is an implementation of `GcsTableStorage`
-/// that uses redis as storage.
-class RedisGcsTableStorage : public GcsTableStorage {
- public:
-  explicit RedisGcsTableStorage(std::shared_ptr<RedisClient> redis_client)
-      : GcsTableStorage(std::make_shared<RedisStoreClient>(std::move(redis_client))) {}
-};
-
-/// \class InMemoryGcsTableStorage
-/// InMemoryGcsTableStorage is an implementation of `GcsTableStorage`
-/// that uses memory as storage.
-class InMemoryGcsTableStorage : public GcsTableStorage {
- public:
-  explicit InMemoryGcsTableStorage(instrumented_io_context &main_io_service)
-      : GcsTableStorage(std::make_shared<ObservableStoreClient>(
-            std::make_unique<InMemoryStoreClient>(main_io_service))) {}
-};
-
 }  // namespace gcs
 }  // namespace ray

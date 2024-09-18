@@ -291,6 +291,8 @@ class GcsServer {
   PeriodicalRunner pubsub_periodical_runner_;
   /// The runner to run function periodically.
   PeriodicalRunner periodical_runner_;
+  // StoreClient used by gcs_table_storage_ and kv_manager_.
+  std::shared_ptr<StoreClient> store_client_;
   /// The gcs table storage.
   std::shared_ptr<gcs::GcsTableStorage> gcs_table_storage_;
   /// Stores references to URIs stored by the GCS for runtime envs.

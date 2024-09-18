@@ -72,15 +72,18 @@ GcsServer::GcsServer(const ray::gcs::GcsServerConfig &config,
   // Init GCS table storage.
   RAY_LOG(INFO) << "GCS storage type is " << storage_type_;
   switch (storage_type_) {
-  case StorageType::IN_MEMORY:
-    gcs_table_storage_ = std::make_shared<InMemoryGcsTableStorage>(main_service_);
+  case (StorageType::IN_MEMORY):
+    store_client_ = std::make_shared<ObservableStoreClient>(
+        std::make_unique<InMemoryStoreClient>(main_service_));
     break;
-  case StorageType::REDIS_PERSIST:
-    gcs_table_storage_ = std::make_shared<gcs::RedisGcsTableStorage>(GetOrConnectRedis());
+  case (StorageType::REDIS_PERSIST):
+    store_client_ = std::make_shared<RedisStoreClient>(GetOrConnectRedis());
     break;
   default:
-    RAY_LOG(FATAL) << "Unexpected storage type: " << storage_type_;
+    RAY_LOG(FATAL) << "Unexpected storage type! " << storage_type_;
   }
+
+  gcs_table_storage_ = std::make_shared<GcsTableStorage>(store_client_);
 
   auto on_done = [this](const ray::Status &status) {
     RAY_CHECK(status.ok()) << "Failed to put internal config";
@@ -560,21 +563,8 @@ void GcsServer::InitUsageStatsClient() {
 
 void GcsServer::InitKVManager() {
   // TODO (yic): Use a factory with configs
-  std::unique_ptr<InternalKVInterface> instance;
-  switch (storage_type_) {
-  case (StorageType::REDIS_PERSIST):
-    instance = std::make_unique<StoreClientInternalKV>(
-        std::make_unique<RedisStoreClient>(GetOrConnectRedis()));
-    break;
-  case (StorageType::IN_MEMORY):
-    instance =
-        std::make_unique<StoreClientInternalKV>(std::make_unique<ObservableStoreClient>(
-            std::make_unique<InMemoryStoreClient>(main_service_)));
-    break;
-  default:
-    RAY_LOG(FATAL) << "Unexpected storage type! " << storage_type_;
-  }
-
+  std::unique_ptr<InternalKVInterface> instance =
+      std::make_unique<StoreClientInternalKV>(store_client_);
   kv_manager_ = std::make_unique<GcsInternalKVManager>(std::move(instance));
 }
 
